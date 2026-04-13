@@ -1,0 +1,42 @@
+/* Phase 1 desktop client stylesheet */
+
+QMainWindow {
+    font-size: 13px;
+}
+
+QToolBar {
+    spacing: 8px;
+    padding: 4px;
+}
+
+QTreeWidget {
+    font-size: 12px;
+}
+
+QTableWidget {
+    font-size: 12px;
+    gridline-color: #ddd;
+}
+
+QTableWidget::item:selected {
+    background-color: #cce5ff;
+    color: #000;
+}
+
+QPushButton {
+    padding: 4px 12px;
+    min-height: 24px;
+}
+
+QLabel#error_label {
+    color: #b42318;
+}
+
+QLineEdit, QSpinBox, QComboBox {
+    padding: 3px 6px;
+    min-height: 22px;
+}
+
+QStatusBar {
+    font-size: 12px;
+}

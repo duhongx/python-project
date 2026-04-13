@@ -1,0 +1,18 @@
+[project]
+name = "db-schema-sync-client"
+version = "0.1.0"
+requires-python = ">=3.9"
+dependencies = [
+  "PyQt6>=6.0.0",
+  "psycopg2-binary>=2.9.0",
+  "keyring>=25.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
