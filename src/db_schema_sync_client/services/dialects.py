@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 from db_schema_sync_client.domain.models import ColumnDefinition, DatabaseType, ObjectType, TableDefinition
 
@@ -25,6 +25,9 @@ class Dialect:
 
     def quote_identifier(self, name: str) -> str:
         return f'"{ name.replace(chr(34), chr(34) * 2) }"'
+
+    def quote_literal(self, value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
 
     def format_column_type(self, column: ColumnDefinition) -> str:
         data_type = column.data_type
@@ -92,18 +95,46 @@ class Dialect:
             return "SMALLSERIAL"
         return ""
 
-    def build_create_role_sql(self, schema_name: str) -> tuple[str, list[str]]:
+    def build_create_role_sql(self, schema_name: str, password_hash: Optional[str] = None) -> tuple[str, list[str]]:
         """生成 CREATE ROLE 语句。
 
-        密码使用占位符 CHANGE_ME，执行前请修改为实际密码。
+        若提供 password_hash（从源库 pg_authid 读取），直接写入目标库，
+        用户可用原密码登录。若无哈希则使用占位符 CHANGE_ME。
         若角色已存在，该语句将失败并显示错误，不影响后续步骤执行。
         """
         q = self.quote_identifier
-        sql = f"CREATE ROLE {q(schema_name)} WITH LOGIN PASSWORD 'CHANGE_ME';"
-        warnings = [
-            f'角色 "{schema_name}" 密码已设置为占位符 CHANGE_ME，'
-            f"请在执行前将 SQL 中的 CHANGE_ME 替换为实际密码。",
-        ]
+        if password_hash:
+            sql = f"CREATE ROLE {q(schema_name)} WITH LOGIN PASSWORD '{password_hash}';"
+            warnings: List[str] = []
+        else:
+            sql = f"CREATE ROLE {q(schema_name)} WITH LOGIN PASSWORD 'CHANGE_ME';"
+            warnings = [
+                f'角色 "{schema_name}" 未能从源库读取密码哈希（需超级用户权限），'
+                f"密码已设置为占位符 CHANGE_ME，请在执行前将 SQL 中的 CHANGE_ME 替换为实际密码。",
+            ]
+        return sql, warnings
+
+    def build_ensure_role_sql(self, schema_name: str, password_hash: Optional[str] = None) -> tuple[str, list[str]]:
+        q = self.quote_identifier
+        if password_hash:
+            sql = (
+                "DO $$ BEGIN "
+                f"IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {self.quote_literal(schema_name)}) THEN "
+                f"CREATE ROLE {q(schema_name)} WITH LOGIN PASSWORD '{password_hash}'; "
+                "END IF; END $$;"
+            )
+            warnings: List[str] = []
+        else:
+            sql = (
+                "DO $$ BEGIN "
+                f"IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {self.quote_literal(schema_name)}) THEN "
+                f"CREATE ROLE {q(schema_name)} WITH LOGIN PASSWORD 'CHANGE_ME'; "
+                "END IF; END $$;"
+            )
+            warnings = [
+                f'角色 "{schema_name}" 未能从源库读取密码哈希（需超级用户权限），'
+                f"如目标端不存在该角色，将以占位符 CHANGE_ME 创建，请在执行前替换为实际密码。",
+            ]
         return sql, warnings
 
     def build_create_schema_sql(self, schema_name: str) -> tuple[str, list[str]]:
@@ -123,6 +154,10 @@ class Dialect:
             f"CREATE ROLE {q(schema_name)} LOGIN PASSWORD 'your_password';"
         ]
         return sql, warnings
+
+    def build_alter_schema_owner_sql(self, schema_name: str) -> tuple[str, list[str]]:
+        q = self.quote_identifier
+        return f"ALTER SCHEMA {q(schema_name)} OWNER TO {q(schema_name)};", []
 
     def build_create_table_sql(
         self,
@@ -159,6 +194,44 @@ class Dialect:
         sql = f"CREATE TABLE IF NOT EXISTS {q(schema_name)}.{q(table_def.name)} (\n{body}\n);"
         return sql, warnings
 
+    def build_post_create_table_sql(
+        self,
+        schema_name: str,
+        table_def: TableDefinition,
+    ) -> tuple[list[str], list[str]]:
+        q = self.quote_identifier
+        statements: list[str] = []
+        warnings: list[str] = []
+
+        if table_def.primary_key and table_def.primary_key.column_names:
+            cols = ", ".join(q(name) for name in table_def.primary_key.column_names)
+            statements.append(
+                f"ALTER TABLE {q(schema_name)}.{q(table_def.name)} "
+                f"ADD CONSTRAINT {q(table_def.primary_key.name)} PRIMARY KEY ({cols});"
+            )
+
+        for index_def in table_def.indexes:
+            sql = index_def.definition.strip()
+            if sql and not sql.endswith(";"):
+                sql += ";"
+            if sql:
+                statements.append(sql)
+
+        if table_def.comment:
+            statements.append(
+                f"COMMENT ON TABLE {q(schema_name)}.{q(table_def.name)} "
+                f"IS {self.quote_literal(table_def.comment)};"
+            )
+
+        for col in table_def.columns:
+            if col.comment:
+                statements.append(
+                    f"COMMENT ON COLUMN {q(schema_name)}.{q(table_def.name)}.{q(col.name)} "
+                    f"IS {self.quote_literal(col.comment)};"
+                )
+
+        return statements, warnings
+
     def build_create_view_sql(
         self,
         schema_name: str,
@@ -188,6 +261,26 @@ class Dialect:
                 f'视图 "{schema_name}"."{view_def.name}" 的定义 SQL 未读取到，已生成占位注释。'
             )
         return sql, warnings
+
+    def build_post_create_view_sql(
+        self,
+        schema_name: str,
+        view_def: TableDefinition,
+    ) -> tuple[list[str], list[str]]:
+        q = self.quote_identifier
+        statements: list[str] = []
+        if view_def.comment:
+            statements.append(
+                f"COMMENT ON VIEW {q(schema_name)}.{q(view_def.name)} "
+                f"IS {self.quote_literal(view_def.comment)};"
+            )
+        for col in view_def.columns:
+            if col.comment:
+                statements.append(
+                    f"COMMENT ON COLUMN {q(schema_name)}.{q(view_def.name)}.{q(col.name)} "
+                    f"IS {self.quote_literal(col.comment)};"
+                )
+        return statements, []
 
 
 class PostgreSQLDialect(Dialect):

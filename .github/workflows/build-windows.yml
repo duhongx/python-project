@@ -1,0 +1,45 @@
+name: Build Windows EXE
+
+on:
+  push:
+    tags:
+      - 'v*'        # 打 tag（如 v1.0.0）时触发
+  workflow_dispatch: # 也可手动触发
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install PyQt6 psycopg2-binary keyring pyinstaller
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller db_schema_sync_client.spec
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-schema-sync-client-windows
+          path: dist/db-schema-sync-client/
+
+      - name: Create release zip
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          Compress-Archive -Path dist\db-schema-sync-client\* -DestinationPath dist\db-schema-sync-client-${{ github.ref_name }}-windows.zip
+
+      - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/db-schema-sync-client-${{ github.ref_name }}-windows.zip

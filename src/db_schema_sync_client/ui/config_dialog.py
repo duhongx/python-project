@@ -12,14 +12,12 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QSpinBox,
-    QSplitter,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
-    QWidget,
 )
 
 from db_schema_sync_client.domain.models import ConnectionProfile, ConnectionRole, DatabaseType
@@ -133,6 +131,10 @@ class ConnectionConfigDialog(QDialog):
         self.owner_prefix_input.setPlaceholderText("df_")
         form.addRow("Owner 前缀", self.owner_prefix_input)
 
+        self.schema_names_filter_input = QLineEdit()
+        self.schema_names_filter_input.setPlaceholderText("例: df_etl,df_esb（这些 Schema 不参与比对/同步）")
+        form.addRow("排除 Schema", self.schema_names_filter_input)
+
         layout.addLayout(form)
 
         self.error_label = QLabel("")
@@ -180,6 +182,7 @@ class ConnectionConfigDialog(QDialog):
         self.username_input.setText(profile.username)
         self.schema_prefix_input.setText(profile.schema_prefix)
         self.owner_prefix_input.setText(profile.owner_prefix)
+        self.schema_names_filter_input.setText(profile.schema_names_filter)
         self.password_input.clear()
 
     # ------------------------------------------------------------------
@@ -209,6 +212,7 @@ class ConnectionConfigDialog(QDialog):
         self.password_input.clear()
         self.schema_prefix_input.clear()
         self.owner_prefix_input.clear()
+        self.schema_names_filter_input.clear()
         self.error_label.clear()
 
     def _read_form(self) -> Tuple[Optional[ConnectionProfile], Optional[str]]:
@@ -244,6 +248,7 @@ class ConnectionConfigDialog(QDialog):
                 credential_key=self._editing_profile.credential_key,
                 schema_prefix=self.schema_prefix_input.text() or "df_",
                 owner_prefix=self.owner_prefix_input.text() or "df_",
+                schema_names_filter=self.schema_names_filter_input.text().strip(),
             )
         else:
             profile = ConnectionProfile(
@@ -256,6 +261,7 @@ class ConnectionConfigDialog(QDialog):
                 username=profile.username,
                 schema_prefix=self.schema_prefix_input.text() or "df_",
                 owner_prefix=self.owner_prefix_input.text() or "df_",
+                schema_names_filter=self.schema_names_filter_input.text().strip(),
             )
         return profile, None
 
@@ -314,108 +320,109 @@ class ConnectionConfigDialog(QDialog):
 
 
 class ProfileManagerDialog(QDialog):
-    """Full profile management dialog with list + CRUD + duplicate + default."""
+    """Full profile management dialog with single list + CRUD + duplicate + default."""
 
     def __init__(self, app_store, parent=None) -> None:
         super().__init__(parent)
         self.app_store = app_store
         self.setWindowTitle("连接管理")
         self.setModal(True)
-        self.resize(800, 520)
+        self.resize(560, 480)
         self._build_ui()
-        self._refresh_lists()
+        self._refresh_list()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # --- Source panel ---
-        source_panel = QWidget()
-        source_layout = QVBoxLayout(source_panel)
-        source_layout.addWidget(QLabel("源端连接"))
-        self.source_list = QListWidget()
-        source_layout.addWidget(self.source_list)
-        source_buttons = QHBoxLayout()
-        add_source = QPushButton("新增")
-        add_source.clicked.connect(lambda: self._add_profile(ConnectionRole.SOURCE))
-        source_buttons.addWidget(add_source)
-        edit_source = QPushButton("编辑")
-        edit_source.clicked.connect(lambda: self._edit_selected(self.source_list))
-        source_buttons.addWidget(edit_source)
-        del_source = QPushButton("删除")
-        del_source.clicked.connect(lambda: self._delete_selected(self.source_list))
-        source_buttons.addWidget(del_source)
-        dup_source = QPushButton("复制")
-        dup_source.clicked.connect(lambda: self._duplicate_selected(self.source_list))
-        source_buttons.addWidget(dup_source)
-        def_source = QPushButton("设为默认")
-        def_source.clicked.connect(lambda: self._set_default(self.source_list, ConnectionRole.SOURCE))
-        source_buttons.addWidget(def_source)
-        source_layout.addLayout(source_buttons)
-        splitter.addWidget(source_panel)
+        self.profile_tree = QTreeWidget()
+        self.profile_tree.setHeaderHidden(True)
+        self.profile_tree.setIndentation(16)
+        layout.addWidget(self.profile_tree)
 
-        # --- Target panel ---
-        target_panel = QWidget()
-        target_layout = QVBoxLayout(target_panel)
-        target_layout.addWidget(QLabel("目标端连接"))
-        self.target_list = QListWidget()
-        target_layout.addWidget(self.target_list)
-        target_buttons = QHBoxLayout()
-        add_target = QPushButton("新增")
-        add_target.clicked.connect(lambda: self._add_profile(ConnectionRole.TARGET))
-        target_buttons.addWidget(add_target)
-        edit_target = QPushButton("编辑")
-        edit_target.clicked.connect(lambda: self._edit_selected(self.target_list))
-        target_buttons.addWidget(edit_target)
-        del_target = QPushButton("删除")
-        del_target.clicked.connect(lambda: self._delete_selected(self.target_list))
-        target_buttons.addWidget(del_target)
-        dup_target = QPushButton("复制")
-        dup_target.clicked.connect(lambda: self._duplicate_selected(self.target_list))
-        target_buttons.addWidget(dup_target)
-        def_target = QPushButton("设为默认")
-        def_target.clicked.connect(lambda: self._set_default(self.target_list, ConnectionRole.TARGET))
-        target_buttons.addWidget(def_target)
-        target_layout.addLayout(target_buttons)
-        splitter.addWidget(target_panel)
+        buttons = QHBoxLayout()
+        add_source_btn = QPushButton("新增源端")
+        add_source_btn.clicked.connect(lambda: self._add_profile(ConnectionRole.SOURCE))
+        buttons.addWidget(add_source_btn)
 
-        layout.addWidget(splitter)
+        add_target_btn = QPushButton("新增目标端")
+        add_target_btn.clicked.connect(lambda: self._add_profile(ConnectionRole.TARGET))
+        buttons.addWidget(add_target_btn)
+
+        edit_btn = QPushButton("编辑")
+        edit_btn.clicked.connect(self._edit_selected)
+        buttons.addWidget(edit_btn)
+
+        del_btn = QPushButton("删除")
+        del_btn.clicked.connect(self._delete_selected)
+        buttons.addWidget(del_btn)
+
+        dup_btn = QPushButton("复制")
+        dup_btn.clicked.connect(self._duplicate_selected)
+        buttons.addWidget(dup_btn)
+
+        def_btn = QPushButton("设为默认")
+        def_btn.clicked.connect(self._set_default)
+        buttons.addWidget(def_btn)
+
+        layout.addLayout(buttons)
 
         close_btn = QPushButton("关闭")
         close_btn.clicked.connect(self.accept)
         layout.addWidget(close_btn)
 
-    def _refresh_lists(self) -> None:
+    def _refresh_list(self) -> None:
         if self.app_store is None:
             return
-        self.source_list.clear()
+
+        # Remember currently selected profile id
+        selected_id = self._get_selected_profile_id()
+
+        self.profile_tree.clear()
+
+        source_group = QTreeWidgetItem(self.profile_tree, ["源端"])
+        source_group.setFlags(source_group.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+        f = source_group.font(0)
+        f.setBold(True)
+        source_group.setFont(0, f)
+
+        target_group = QTreeWidgetItem(self.profile_tree, ["目标端"])
+        target_group.setFlags(target_group.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+        target_group.setFont(0, f)
+
+        restore_item = None
         for p in self.app_store.list_profiles(ConnectionRole.SOURCE):
-            label = f"{'★ ' if p.is_default else ''}{p.name} ({p.host}:{p.port}/{p.database})"
-            item = QListWidgetItem(label)
-            item.setData(Qt.ItemDataRole.UserRole, p.id)
-            self.source_list.addItem(item)
+            label = f"{'★ ' if p.is_default else ''}{p.name}  -  {p.host}:{p.port}/{p.database}"
+            item = QTreeWidgetItem(source_group, [label])
+            item.setData(0, Qt.ItemDataRole.UserRole, p.id)
+            if p.id == selected_id:
+                restore_item = item
 
-        self.target_list.clear()
         for p in self.app_store.list_profiles(ConnectionRole.TARGET):
-            label = f"{'★ ' if p.is_default else ''}{p.name} [{p.db_type.value}] ({p.host}:{p.port}/{p.database})"
-            item = QListWidgetItem(label)
-            item.setData(Qt.ItemDataRole.UserRole, p.id)
-            self.target_list.addItem(item)
+            label = f"{'★ ' if p.is_default else ''}{p.name} [{p.db_type.value}]  -  {p.host}:{p.port}/{p.database}"
+            item = QTreeWidgetItem(target_group, [label])
+            item.setData(0, Qt.ItemDataRole.UserRole, p.id)
+            if p.id == selected_id:
+                restore_item = item
 
-    def _get_selected_profile_id(self, list_widget: QListWidget) -> Optional[int]:
-        current = list_widget.currentItem()
+        self.profile_tree.expandAll()
+
+        if restore_item is not None:
+            self.profile_tree.setCurrentItem(restore_item)
+
+    def _get_selected_profile_id(self) -> Optional[int]:
+        current = self.profile_tree.currentItem()
         if current is None:
             return None
-        return current.data(Qt.ItemDataRole.UserRole)
+        return current.data(0, Qt.ItemDataRole.UserRole)  # None for group headers
 
     def _add_profile(self, role: ConnectionRole) -> None:
         dialog = ConnectionConfigDialog(self.app_store, parent=self)
         dialog.start_create_profile(role)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._refresh_lists()
+            self._refresh_list()
 
-    def _edit_selected(self, list_widget: QListWidget) -> None:
-        profile_id = self._get_selected_profile_id(list_widget)
+    def _edit_selected(self) -> None:
+        profile_id = self._get_selected_profile_id()
         if profile_id is None:
             return
         profile = self.app_store.get_profile(profile_id)
@@ -424,10 +431,10 @@ class ProfileManagerDialog(QDialog):
         dialog = ConnectionConfigDialog(self.app_store, parent=self)
         dialog.start_edit_profile(profile)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._refresh_lists()
+            self._refresh_list()
 
-    def _delete_selected(self, list_widget: QListWidget) -> None:
-        profile_id = self._get_selected_profile_id(list_widget)
+    def _delete_selected(self) -> None:
+        profile_id = self._get_selected_profile_id()
         if profile_id is None:
             return
         reply = QMessageBox.question(
@@ -436,10 +443,10 @@ class ProfileManagerDialog(QDialog):
         )
         if reply == QMessageBox.StandardButton.Yes:
             self.app_store.delete_profile(profile_id)
-            self._refresh_lists()
+            self._refresh_list()
 
-    def _duplicate_selected(self, list_widget: QListWidget) -> None:
-        profile_id = self._get_selected_profile_id(list_widget)
+    def _duplicate_selected(self) -> None:
+        profile_id = self._get_selected_profile_id()
         if profile_id is None:
             return
         profile = self.app_store.get_profile(profile_id)
@@ -460,13 +467,17 @@ class ProfileManagerDialog(QDialog):
             username=profile.username,
             schema_prefix=profile.schema_prefix,
             owner_prefix=profile.owner_prefix,
+            schema_names_filter=profile.schema_names_filter,
         )
         self.app_store.save_profile(new_profile, password)
-        self._refresh_lists()
+        self._refresh_list()
 
-    def _set_default(self, list_widget: QListWidget, role: ConnectionRole) -> None:
-        profile_id = self._get_selected_profile_id(list_widget)
+    def _set_default(self) -> None:
+        profile_id = self._get_selected_profile_id()
         if profile_id is None:
             return
-        self.app_store.set_default_profile(role, profile_id)
-        self._refresh_lists()
+        profile = self.app_store.get_profile(profile_id)
+        if profile is None:
+            return
+        self.app_store.set_default_profile(profile.role, profile_id)
+        self._refresh_list()

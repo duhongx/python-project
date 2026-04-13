@@ -22,6 +22,8 @@ class DiffStatus(str, Enum):
 class DiffCategory(str, Enum):
     AUTO_SYNCABLE = "auto_syncable"
     SCHEMA_SYNCABLE = "schema_syncable"  # 目标端缺少整个 Schema，可生成 CREATE SCHEMA + CREATE TABLE
+    TABLE_SYNCABLE = "table_syncable"   # Schema 存在但目标端缺少表/视图，可生成 CREATE TABLE/VIEW
+    VIEW_REBUILD_SYNCABLE = "view_rebuild_syncable"  # 目标端视图字段缺失，通过备份+重建视图同步
     MANUAL_REQUIRED = "manual_required"
     ONLY_HINT = "only_hint"
 

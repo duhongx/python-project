@@ -23,6 +23,19 @@ class ConnectionRole(str, Enum):
 
 
 @dataclass(frozen=True)
+class PrimaryKeyDefinition:
+    name: str
+    column_names: Tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class IndexDefinition:
+    name: str
+    definition: str
+    is_unique: bool = False
+
+
+@dataclass(frozen=True)
 class ConnectionProfile:
     name: str
     role: ConnectionRole
@@ -33,6 +46,8 @@ class ConnectionProfile:
     username: str
     schema_prefix: str = "df_"
     owner_prefix: str = "df_"
+    # 精确 Schema 名称过滤，逗号或斜杠分隔，如 "df_etl,df_esb"；空字符串表示不限制
+    schema_names_filter: str = ""
     id: Optional[int] = None
     credential_key: Optional[str] = None
     is_default: bool = False
@@ -55,6 +70,7 @@ class ColumnDefinition:
     is_nullable: bool
     column_default: Optional[str]
     is_sequence_related: bool = False
+    comment: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -64,6 +80,9 @@ class TableDefinition:
     object_type: ObjectType
     columns: Tuple[ColumnDefinition, ...] = field(default_factory=tuple)
     view_definition: Optional[str] = None  # 视图 DDL，僅视图对象有效
+    comment: Optional[str] = None
+    primary_key: Optional[PrimaryKeyDefinition] = None
+    indexes: Tuple[IndexDefinition, ...] = field(default_factory=tuple)
 
     @property
     def qualified_name(self) -> str:
@@ -78,6 +97,10 @@ class TableDefinition:
 class SchemaSnapshot:
     database_name: str
     tables: Tuple[TableDefinition, ...] = field(default_factory=tuple)
+    schema_owners: Dict[str, str] = field(default_factory=dict)
+    # schema_name → 密码哈希（从源库 pg_authid 读取，可直接用于 CREATE ROLE ... PASSWORD）
+    # 若源库无超级用户权限则为空 dict
+    role_hashes: Dict[str, str] = field(default_factory=dict)
 
     @property
     def qualified_objects(self) -> Dict[str, TableDefinition]:

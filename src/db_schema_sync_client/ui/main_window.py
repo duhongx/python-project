@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
@@ -12,7 +13,6 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -21,14 +21,17 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSplitter,
     QStatusBar,
     QToolBar,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from db_schema_sync_client.domain.diff import SchemaDiff
-from db_schema_sync_client.domain.models import ConnectionProfile, ConnectionRole, SchemaSnapshot
+from db_schema_sync_client.domain.diff import DiffCategory, SchemaDiff
+from db_schema_sync_client.domain.models import ConnectionProfile, ConnectionRole, ObjectType, SchemaSnapshot
 from db_schema_sync_client.infrastructure.app_store import AppStore
 from db_schema_sync_client.infrastructure.db_connection import DatabaseConnectionFactory
 from db_schema_sync_client.infrastructure.db_metadata import MetadataReader
@@ -41,78 +44,6 @@ from db_schema_sync_client.ui.execution_result_dialog import ExecutionResultDial
 from db_schema_sync_client.ui.history_dialog import HistoryDialog
 from db_schema_sync_client.ui.sql_preview_dialog import SqlPreviewDialog
 from db_schema_sync_client.ui.workers import CompareWorker, MetadataWorker, SyncWorker
-
-
-class _SchemaSelector(QWidget):
-    """Checkable schema multi-select combo for the header panel."""
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        self._combo = QComboBox()
-        self._combo.setMinimumWidth(180)
-        self._combo.addItem("—")
-        self._combo.setEnabled(False)
-        lay.addWidget(self._combo)
-        self._schemas: list[str] = []
-        self._checked: set[str] = set()
-
-    def set_schemas(self, schemas: list[str]) -> None:
-        self._schemas = sorted(schemas)
-        self._checked = set(self._schemas)
-        self._rebuild()
-
-    def selected_schemas(self) -> set[str]:
-        return set(self._checked)
-
-    def clear_schemas(self) -> None:
-        model = self._combo.model()
-        try:
-            model.itemChanged.disconnect(self._on_changed)
-        except Exception:
-            pass
-        self._schemas = []
-        self._checked = set()
-        self._combo.blockSignals(True)
-        self._combo.clear()
-        self._combo.addItem("—")
-        self._combo.setEnabled(False)
-        self._combo.blockSignals(False)
-
-    def _rebuild(self) -> None:
-        model = self._combo.model()
-        try:
-            model.itemChanged.disconnect(self._on_changed)
-        except Exception:
-            pass
-        self._combo.blockSignals(True)
-        self._combo.clear()
-        n = len(self._schemas)
-        self._combo.addItem(f"全部 Schema ({n})")
-        for schema in self._schemas:
-            self._combo.addItem(schema)
-        model = self._combo.model()
-        for i in range(1, n + 1):
-            item = model.item(i)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked)
-        self._combo.setEnabled(True)
-        self._combo.blockSignals(False)
-        model.itemChanged.connect(self._on_changed)
-
-    def _on_changed(self, item) -> None:
-        text = item.text()
-        if text in self._schemas:
-            if item.checkState() == Qt.CheckState.Checked:
-                self._checked.add(text)
-            else:
-                self._checked.discard(text)
-            nc, n = len(self._checked), len(self._schemas)
-            label = f"全部 Schema ({n})" if nc == n else f"已选 {nc}/{n} Schema"
-            self._combo.blockSignals(True)
-            self._combo.setItemText(0, label)
-            self._combo.blockSignals(False)
 
 
 class MainWindow(QMainWindow):
@@ -145,124 +76,143 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
         toolbar.addAction("连接配置").triggered.connect(self._open_config_dialog)
-        toolbar.addAction("刷新结构").triggered.connect(self._load_metadata)
         toolbar.addAction("历史记录").triggered.connect(self._open_history_dialog)
 
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(8, 8, 8, 4)
+        main_layout.setSpacing(6)
 
-        # ── PgAdmin4-style selector panel ─────────────────────────────────
-        sel_frame = QFrame()
-        sel_frame.setStyleSheet(
-            "QFrame { background-color: #f8f9fa; border-bottom: 1px solid #ced4da; }"
-        )
-        grid = QGridLayout(sel_frame)
-        grid.setContentsMargins(14, 10, 14, 10)
-        grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(8)
+        # ── Top: dual tree panels (horizontal splitter) ───────────────────
+        splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # Source row
-        src_lbl = QLabel("Select Source")
-        f = QFont()
-        f.setBold(True)
-        src_lbl.setFont(f)
-        src_lbl.setMinimumWidth(100)
-        grid.addWidget(src_lbl, 0, 0)
+        # ── Left: source panel ───────────────────────────────────────────
+        source_panel = QFrame()
+        source_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        src_layout = QVBoxLayout(source_panel)
+        src_layout.setContentsMargins(4, 4, 4, 4)
+        src_layout.setSpacing(4)
 
+        _bold = QFont()
+        _bold.setBold(True)
+
+        src_header = QHBoxLayout()
+        src_title = QLabel("源端")
+        src_title.setFont(_bold)
+        src_header.addWidget(src_title)
         self.source_combo = QComboBox()
-        self.source_combo.setMinimumWidth(210)
+        self.source_combo.setMinimumWidth(160)
         self.source_combo.currentIndexChanged.connect(self._on_source_combo_changed)
-        grid.addWidget(self.source_combo, 0, 1)
-
+        src_header.addWidget(self.source_combo, 1)
         self.source_db_label = QLabel("")
-        self.source_db_label.setStyleSheet("color: #6c757d;")
-        grid.addWidget(self.source_db_label, 0, 2)
+        self.source_db_label.setStyleSheet("color: #6c757d; font-size: 11px;")
+        src_header.addWidget(self.source_db_label)
+        src_layout.addLayout(src_header)
 
-        self.source_schema_selector = _SchemaSelector()
-        grid.addWidget(self.source_schema_selector, 0, 3)
+        src_btn_row = QHBoxLayout()
+        src_select_all_btn = QPushButton("全选")
+        src_select_all_btn.setFixedWidth(52)
+        src_select_all_btn.clicked.connect(self._source_select_all)
+        src_btn_row.addWidget(src_select_all_btn)
+        src_deselect_btn = QPushButton("全不选")
+        src_deselect_btn.setFixedWidth(58)
+        src_deselect_btn.clicked.connect(self._source_deselect_all)
+        src_btn_row.addWidget(src_deselect_btn)
+        src_btn_row.addStretch()
+        src_refresh_btn = QPushButton("↺ 刷新")
+        src_refresh_btn.setFixedWidth(64)
+        src_refresh_btn.clicked.connect(self._refresh_source)
+        src_btn_row.addWidget(src_refresh_btn)
+        src_layout.addLayout(src_btn_row)
 
-        # Target row
-        tgt_lbl = QLabel("Select Target")
-        tgt_lbl.setFont(f)
-        tgt_lbl.setMinimumWidth(100)
-        grid.addWidget(tgt_lbl, 1, 0)
+        self._source_tree = QTreeWidget()
+        self._source_tree.setColumnCount(2)
+        self._source_tree.setHeaderLabels(["对象", "类型"])
+        self._source_tree.setAlternatingRowColors(True)
+        self._source_tree.setUniformRowHeights(True)
+        self._source_tree.setColumnWidth(0, 220)
+        self._source_tree.itemChanged.connect(self._on_src_tree_item_changed)
+        src_layout.addWidget(self._source_tree)
+        splitter.addWidget(source_panel)
 
+        # ── Right: target panel ──────────────────────────────────────────
+        target_panel = QFrame()
+        target_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        tgt_layout = QVBoxLayout(target_panel)
+        tgt_layout.setContentsMargins(4, 4, 4, 4)
+        tgt_layout.setSpacing(4)
+
+        tgt_header = QHBoxLayout()
+        tgt_title = QLabel("目标端")
+        tgt_title.setFont(_bold)
+        tgt_header.addWidget(tgt_title)
         self.target_combo = QComboBox()
-        self.target_combo.setMinimumWidth(210)
+        self.target_combo.setMinimumWidth(160)
         self.target_combo.currentIndexChanged.connect(self._on_target_combo_changed)
-        grid.addWidget(self.target_combo, 1, 1)
+        tgt_header.addWidget(self.target_combo, 1)
+        self.target_db_label = QLabel("")
+        self.target_db_label.setStyleSheet("color: #6c757d; font-size: 11px;")
+        tgt_header.addWidget(self.target_db_label)
+        tgt_layout.addLayout(tgt_header)
 
-        self.target_type_label = QLabel("")
-        self.target_type_label.setStyleSheet("color: #6c757d;")
-        grid.addWidget(self.target_type_label, 1, 2)
+        tgt_btn_row = QHBoxLayout()
+        tgt_btn_row.addStretch()
+        tgt_refresh_btn = QPushButton("↺ 刷新")
+        tgt_refresh_btn.setFixedWidth(64)
+        tgt_refresh_btn.clicked.connect(self._refresh_target)
+        tgt_btn_row.addWidget(tgt_refresh_btn)
+        tgt_layout.addLayout(tgt_btn_row)
 
-        self.target_schema_selector = _SchemaSelector()
-        grid.addWidget(self.target_schema_selector, 1, 3)
+        self._target_tree = QTreeWidget()
+        self._target_tree.setColumnCount(2)
+        self._target_tree.setHeaderLabels(["对象", "类型"])
+        self._target_tree.setAlternatingRowColors(True)
+        self._target_tree.setUniformRowHeights(True)
+        self._target_tree.setColumnWidth(0, 220)
+        tgt_layout.addWidget(self._target_tree)
+        splitter.addWidget(target_panel)
 
-        # Compare button (spans 2 rows)
-        self._compare_btn = QPushButton("\u21c4  \u5f00\u59cb\u6bd4\u5bf9")
-        self._compare_btn.setMinimumSize(130, 60)
+        main_layout.addWidget(splitter, stretch=2)
+
+        # ── Compare strip ─────────────────────────────────────────────────
+        compare_strip = QHBoxLayout()
+        compare_strip.addStretch()
+        self._compare_btn = QPushButton("⇄  开始比对")
+        self._compare_btn.setMinimumSize(130, 40)
         self._compare_btn.setStyleSheet(
             "QPushButton { font-size: 13px; font-weight: bold; "
             "background-color: #0d6efd; color: white; "
-            "border-radius: 6px; padding: 8px 16px; } "
+            "border-radius: 6px; padding: 6px 24px; } "
             "QPushButton:hover { background-color: #0b5ed7; } "
             "QPushButton:pressed { background-color: #0a58ca; }"
         )
         self._compare_btn.clicked.connect(self._run_comparison)
-        grid.addWidget(self._compare_btn, 0, 4, 2, 1)
+        compare_strip.addWidget(self._compare_btn)
+        compare_strip.addStretch()
+        main_layout.addLayout(compare_strip)
 
-        gen_btn = QPushButton("生成 SQL")
-        gen_btn.clicked.connect(self._open_sql_preview)
-        grid.addWidget(gen_btn, 0, 5)
-
-        export_btn = QPushButton("导出报告")
-        export_btn.clicked.connect(self._export_report)
-        grid.addWidget(export_btn, 1, 5)
-
-        # ── 用户/Schema 前缀过滤行 ────────────────────────────────────────
-        prefix_lbl = QLabel("用户/Schema 前缀:")
-        prefix_lbl.setMinimumWidth(100)
-        grid.addWidget(prefix_lbl, 2, 0)
-
-        self._prefix_input = QLineEdit()
-        self._prefix_input.setPlaceholderText("df_  （多个前缀用英文逗号分隔，如 df_,jk_；留空表示不限制）")
-        self._prefix_input.setMinimumWidth(350)
-        self._prefix_input.returnPressed.connect(self._apply_prefix_filter)
-        grid.addWidget(self._prefix_input, 2, 1, 1, 3)
-
-        apply_prefix_btn = QPushButton("应用并刷新")
-        apply_prefix_btn.setToolTip("重新按当前前缀加载两侧元数据")
-        apply_prefix_btn.clicked.connect(self._apply_prefix_filter)
-        grid.addWidget(apply_prefix_btn, 2, 4)
-
-        grid.setColumnStretch(3, 1)
-        main_layout.addWidget(sel_frame)
-
-        # ── Info / result summary label ───────────────────────────────────
-        self.info_label = QLabel(
-            "Database Compare：选择源端和目标端连接，选择 Schema 范围，然后点击  ⇄ 开始比对"
-        )
+        # ── Info label (hidden until compare runs) ────────────────────────
+        self.info_label = QLabel("")
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.info_label.setStyleSheet(
             "QLabel { padding: 6px; color: #495057; background-color: #e9f3ff;"
             " border-bottom: 1px solid #bee5eb; font-size: 12px; }"
         )
+        self.info_label.hide()
         main_layout.addWidget(self.info_label)
 
-        # ── Comparison results (full width) ───────────────────────────────
+        # ── Comparison results (hidden until compare runs) ────────────────
         self.comparison_panel = ComparisonPanel()
+        self.comparison_panel.hide()
         main_layout.addWidget(self.comparison_panel, stretch=1)
 
-        # ── Action bar ────────────────────────────────────────────────────
-        action_widget = QWidget()
-        action_widget.setStyleSheet(
+        # ── Action bar (hidden until compare runs) ────────────────────────
+        self._action_widget = QWidget()
+        self._action_widget.setStyleSheet(
             "QWidget { background-color: #f8f9fa; border-top: 1px solid #ced4da; }"
         )
-        action_bar = QHBoxLayout(action_widget)
+        action_bar = QHBoxLayout(self._action_widget)
         action_bar.setContentsMargins(10, 6, 10, 6)
         action_bar.setSpacing(8)
 
@@ -271,20 +221,43 @@ class MainWindow(QMainWindow):
         action_bar.addWidget(self.selected_label)
         action_bar.addSpacing(8)
 
+        _btn_style = (
+            "QPushButton { background-color: #0d6efd; color: white;"
+            " border-radius: 6px; padding: 4px 16px; } "
+            "QPushButton:hover { background-color: #0b5ed7; } "
+            "QPushButton:pressed { background-color: #0a58ca; } "
+            "QPushButton:disabled { background-color: #6ea8fe; }"
+        )
+
+        self._gen_sql_btn = QPushButton("生成 SQL")
+        self._gen_sql_btn.setStyleSheet(_btn_style)
+        self._gen_sql_btn.clicked.connect(self._open_sql_preview)
+        action_bar.addWidget(self._gen_sql_btn)
+
         dry_run_btn = QPushButton("Dry Run")
+        dry_run_btn.setStyleSheet(_btn_style)
         dry_run_btn.clicked.connect(self._handle_direct_dry_run)
         action_bar.addWidget(dry_run_btn)
 
         clear_btn = QPushButton("清空选择")
+        clear_btn.setStyleSheet(_btn_style)
         clear_btn.clicked.connect(self._clear_selection)
         action_bar.addWidget(clear_btn)
 
         self._execute_btn = QPushButton("执行同步")
+        self._execute_btn.setStyleSheet(_btn_style)
         self._execute_btn.clicked.connect(self._handle_direct_execute)
         action_bar.addWidget(self._execute_btn)
 
         action_bar.addStretch()
-        main_layout.addWidget(action_widget)
+
+        export_btn = QPushButton("导出报告")
+        export_btn.setStyleSheet(_btn_style)
+        export_btn.clicked.connect(self._export_report)
+        action_bar.addWidget(export_btn)
+
+        self._action_widget.hide()
+        main_layout.addWidget(self._action_widget)
 
         # Progress bar
         self.progress_bar = QProgressBar()
@@ -350,16 +323,13 @@ class MainWindow(QMainWindow):
             self.current_source_profile = self.app_store.get_profile(profile_id)
             p = self.current_source_profile
             self.source_db_label.setText(f"{p.db_type.value} · {p.host}:{p.port}" if p else "")
-            # 若前缀输入框为空，用该 profile 的 schema_prefix 作为默认值
-            if p and not self._prefix_input.text().strip():
-                self._prefix_input.setText(p.schema_prefix)
             self._source_snapshot = None
-            self.source_schema_selector.clear_schemas()
+            self._source_tree.clear()
             self._load_source_metadata()
         else:
             self.current_source_profile = None
             self.source_db_label.setText("")
-            self.source_schema_selector.clear_schemas()
+            self._source_tree.clear()
             self._source_snapshot = None
 
     def _on_target_combo_changed(self) -> None:
@@ -367,14 +337,14 @@ class MainWindow(QMainWindow):
         if self.app_store is not None and profile_id is not None:
             self.current_target_profile = self.app_store.get_profile(profile_id)
             p = self.current_target_profile
-            self.target_type_label.setText(f"{p.db_type.value} · {p.host}:{p.port}" if p else "")
+            self.target_db_label.setText(f"{p.db_type.value} · {p.host}:{p.port}" if p else "")
             self._target_snapshot = None
-            self.target_schema_selector.clear_schemas()
+            self._target_tree.clear()
             self._load_target_metadata()
         else:
             self.current_target_profile = None
-            self.target_type_label.setText("")
-            self.target_schema_selector.clear_schemas()
+            self.target_db_label.setText("")
+            self._target_tree.clear()
             self._target_snapshot = None
 
     # ------------------------------------------------------------------
@@ -417,25 +387,47 @@ class MainWindow(QMainWindow):
         """Refresh both sides — reset cached snapshots first."""
         self._source_snapshot = None
         self._target_snapshot = None
-        self.source_schema_selector.clear_schemas()
-        self.target_schema_selector.clear_schemas()
+        self._source_tree.clear()
+        self._target_tree.clear()
         self._load_source_metadata()
         self._load_target_metadata()
 
-    def _build_metadata_filters(self) -> "MetadataFilters":
-        """根据前缀输入框内容构建 MetadataFilters。
-        
-        支持逗号分隔多个前缀，例如 ``df_,jk_``。
-        留空则不限制前缀（加载全部用户/Schema）。
-        """
+    def _build_metadata_filters(
+        self,
+        profile: Optional[ConnectionProfile],
+        *,
+        filter_owner_prefix: bool,
+    ) -> "MetadataFilters":
+        """根据连接配置构建 MetadataFilters。"""
         from db_schema_sync_client.infrastructure.db_metadata import MetadataFilters
 
-        text = self._prefix_input.text().strip()
-        return MetadataFilters.from_prefix_text(text)
+        prefix_text = profile.schema_prefix if profile else ""
+        base = MetadataFilters.from_prefix_text(prefix_text)
 
-    def _apply_prefix_filter(self) -> None:
-        """点击"应用并刷新"或在输入框按 Enter 时，以新前缀重新加载两侧元数据。"""
-        self._load_metadata()
+        schema_filter = profile.schema_names_filter if profile else ""
+        if schema_filter:
+            exclude = tuple(
+                n.strip()
+                for n in schema_filter.replace("/", ",").split(",")
+                if n.strip()
+            )
+            return MetadataFilters(
+                schema_prefixes=base.schema_prefixes,
+                owner_prefixes=base.owner_prefixes,
+                exclude_schema_names=exclude,
+                filter_owner_prefix=filter_owner_prefix,
+            )
+        return MetadataFilters(
+            schema_prefixes=base.schema_prefixes,
+            owner_prefixes=base.owner_prefixes,
+            filter_owner_prefix=filter_owner_prefix,
+        )
+
+    def _build_source_metadata_filters(self) -> "MetadataFilters":
+        return self._build_metadata_filters(self.current_source_profile, filter_owner_prefix=True)
+
+    def _build_target_metadata_filters(self) -> "MetadataFilters":
+        return self._build_metadata_filters(self.current_target_profile, filter_owner_prefix=False)
 
     def _get_password_for_profile(self, profile: ConnectionProfile) -> Optional[str]:
         """Return the stored password; if missing, prompt user to re-enter and persist it."""
@@ -476,14 +468,14 @@ class MainWindow(QMainWindow):
         self._show_progress()
         self.statusBar().showMessage("正在加载源端结构…")
 
-        filters = self._build_metadata_filters()
+        filters = self._build_source_metadata_filters()
         worker = MetadataWorker(self.metadata_reader, profile, password, filters=filters)
 
         def _on_done(snapshot: SchemaSnapshot) -> None:
             self._source_snapshot = snapshot
-            schemas = sorted({t.schema for t in snapshot.tables})
-            self.source_schema_selector.set_schemas(schemas)
+            self._populate_source_tree(snapshot)
             self._worker_done(worker)
+            schemas = sorted({t.schema for t in snapshot.tables})
             self.statusBar().showMessage(
                 f"源端结构加载完成（{len(schemas)} 个 Schema，{len(snapshot.tables)} 个对象）", 4000
             )
@@ -511,14 +503,14 @@ class MainWindow(QMainWindow):
         self._show_progress()
         self.statusBar().showMessage("正在加载目标端结构…")
 
-        filters = self._build_metadata_filters()
+        filters = self._build_target_metadata_filters()
         worker = MetadataWorker(self.metadata_reader, profile, password, filters=filters)
 
         def _on_done(snapshot: SchemaSnapshot) -> None:
             self._target_snapshot = snapshot
-            schemas = sorted({t.schema for t in snapshot.tables})
-            self.target_schema_selector.set_schemas(schemas)
+            self._populate_target_tree(snapshot)
             self._worker_done(worker)
+            schemas = sorted({t.schema for t in snapshot.tables})
             self.statusBar().showMessage(
                 f"目标端结构加载完成（{len(schemas)} 个 Schema，{len(snapshot.tables)} 个对象）", 4000
             )
@@ -526,6 +518,42 @@ class MainWindow(QMainWindow):
         def _on_error(msg: str) -> None:
             self._worker_done(worker)
             QMessageBox.warning(self, "加载失败", f"目标端加载失败: {msg}")
+
+        worker.finished.connect(_on_done)
+        worker.error.connect(_on_error)
+        worker.progress.connect(self._update_progress)
+        self._workers.append(worker)
+        worker.start()
+
+    def _refresh_target_after_sync_and_recompare(self) -> None:
+        """Invalidate target snapshot, reload it, then rerun comparison."""
+        target = self.current_target_profile
+        if target is None:
+            return
+
+        password = self._get_password_for_profile(target)
+        if password is None:
+            return
+
+        self._target_snapshot = None
+        self._target_tree.clear()
+        self._compare_btn.setEnabled(False)
+        self._show_progress()
+        self.statusBar().showMessage("同步完成，正在刷新目标端结构并重新比对…")
+
+        filters = self._build_target_metadata_filters()
+        worker = MetadataWorker(self.metadata_reader, target, password, filters=filters)
+
+        def _on_done(snapshot: SchemaSnapshot) -> None:
+            self._target_snapshot = snapshot
+            self._populate_target_tree(snapshot, checked_schemas=self._get_source_selected_schemas())
+            self._worker_done(worker)
+            self._run_comparison()
+
+        def _on_error(msg: str) -> None:
+            self._worker_done(worker)
+            self._compare_btn.setEnabled(True)
+            QMessageBox.warning(self, "刷新失败", f"同步后刷新目标端失败: {msg}")
 
         worker.finished.connect(_on_done)
         worker.error.connect(_on_error)
@@ -560,10 +588,6 @@ class MainWindow(QMainWindow):
         if target_pw is None:
             return
 
-        # Always re-fetch fresh metadata — clear any cached snapshots
-        self._source_snapshot = None
-        self._target_snapshot = None
-
         self._compare_btn.setEnabled(False)
         self._show_progress()
 
@@ -574,12 +598,13 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "操作失败", msg)
 
         def _do_compare() -> None:
-            sel = self.source_schema_selector.selected_schemas()
+            sel = self._get_source_selected_schemas()
             if not sel:
                 sel = {t.schema for t in self._source_snapshot.tables}
             f_src = SchemaSnapshot(
                 database_name=self._source_snapshot.database_name,
                 tables=tuple(t for t in self._source_snapshot.tables if t.schema in sel),
+                role_hashes=self._source_snapshot.role_hashes,
             )
             f_tgt = SchemaSnapshot(
                 database_name=self._target_snapshot.database_name,
@@ -601,11 +626,16 @@ class MainWindow(QMainWindow):
                     "QLabel { padding: 6px; color: #155724; background-color: #d4edda;"
                     " border-bottom: 1px solid #c3e6cb; font-size: 12px; }"
                 )
+                self.info_label.show()
+                self.comparison_panel.show()
+                self._action_widget.show()
                 self._compare_btn.setEnabled(True)
                 self._persist_compare_task(source, target, diff)
                 self.statusBar().showMessage(
                     f"比对完成（{n_schemas} 个 Schema，共 {total} 处差异）", 5000
                 )
+                # 目标端树镜像源端勾选状态
+                self._populate_target_tree(self._target_snapshot, checked_schemas=sel)
 
             cw.finished.connect(_on_cmp_done)
             cw.error.connect(lambda msg: _abort(cw, msg))
@@ -618,11 +648,11 @@ class MainWindow(QMainWindow):
             if self._target_snapshot is not None:
                 _do_compare()
                 return
-            tw = MetadataWorker(self.metadata_reader, target, target_pw, filters=self._build_metadata_filters())
+            tw = MetadataWorker(self.metadata_reader, target, target_pw, filters=self._build_target_metadata_filters())
 
             def _on_tgt(snap: SchemaSnapshot) -> None:
                 self._target_snapshot = snap
-                self.target_schema_selector.set_schemas(sorted({t.schema for t in snap.tables}))
+                self._populate_target_tree(snap)
                 self._worker_done(tw)
                 _do_compare()
 
@@ -635,11 +665,11 @@ class MainWindow(QMainWindow):
 
         # ── kick off ───────────────────────────────────────────────────
         if self._source_snapshot is None:
-            sw = MetadataWorker(self.metadata_reader, source, source_pw, filters=self._build_metadata_filters())
+            sw = MetadataWorker(self.metadata_reader, source, source_pw, filters=self._build_source_metadata_filters())
 
             def _on_src(snap: SchemaSnapshot) -> None:
                 self._source_snapshot = snap
-                self.source_schema_selector.set_schemas(sorted({t.schema for t in snap.tables}))
+                self._populate_source_tree(snap)
                 self._worker_done(sw)
                 _load_target_then_compare()
 
@@ -657,9 +687,11 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def generate_sql_plan_for_selected(self) -> GeneratedSqlPlan:
-        """Generate a SQL plan from the currently selected auto-syncable diffs."""
+        """Generate a SQL plan from the currently selected diffs."""
         selected_columns = self.comparison_panel.selected_auto_syncable_diffs()
         selected_schemas = self.comparison_panel.selected_schema_syncable_diffs()
+        selected_tables = self.comparison_panel.selected_table_syncable_diffs()
+        selected_view_rebuild_diffs = self.comparison_panel.selected_view_rebuild_diffs()
 
         target_type = (
             self.current_target_profile.db_type
@@ -675,12 +707,19 @@ class MainWindow(QMainWindow):
             if diff.source_column is not None
         ]
 
-        # Count non-selected categories from current diff
+        rebuild_view_pairs = sorted({(d.schema, d.object_name) for d in selected_view_rebuild_diffs})
+        rebuild_views = []
+        if self._source_snapshot is not None and rebuild_view_pairs:
+            source_map = {
+                (t.schema, t.name): t
+                for t in self._source_snapshot.tables
+                if t.object_type == ObjectType.VIEW
+            }
+            rebuild_views = [source_map[pair] for pair in rebuild_view_pairs if pair in source_map]
+
         manual_count = 0
         hint_count = 0
         if self.current_diff:
-            from db_schema_sync_client.domain.diff import DiffCategory
-
             for cd in self.current_diff.column_diffs:
                 if cd.category == DiffCategory.MANUAL_REQUIRED:
                     manual_count += 1
@@ -692,42 +731,65 @@ class MainWindow(QMainWindow):
                 elif od.category == DiffCategory.ONLY_HINT:
                     hint_count += 1
 
-        # Schema 级别同步（生成 CREATE SCHEMA + CREATE TABLE）
-        if selected_schemas and not column_items:
-            return self.sql_generator.generate_schema_creates(
+        role_hashes = self._source_snapshot.role_hashes if self._source_snapshot else {}
+        owner_fix_schemas: list[str] = []
+        if self._target_snapshot is not None:
+            for schema_name in sorted({od.schema for od in selected_tables}):
+                owner = self._target_snapshot.schema_owners.get(schema_name)
+                if owner and owner != schema_name:
+                    owner_fix_schemas.append(schema_name)
+        risk_levels = {"low": 0, "medium": 1, "high": 2}
+
+        plans = []
+        if selected_schemas:
+            plans.append(self.sql_generator.generate_schema_creates(
                 schema_object_diffs=selected_schemas,
                 target_type=target_type,
-                manual_count=manual_count,
-                hint_count=hint_count,
-            )
-        elif selected_schemas and column_items:
-            # 混合：先建 Schema/Table，再补充字段
-            schema_plan = self.sql_generator.generate_schema_creates(
-                schema_object_diffs=selected_schemas, target_type=target_type
-            )
-            col_plan = self.sql_generator.generate_missing_columns(
-                items=column_items, target_type=target_type
-            )
-            risk_levels = {"low": 0, "medium": 1, "high": 2}
-            combined_risk = max(
-                schema_plan.risk_level, col_plan.risk_level,
-                key=lambda r: risk_levels.get(r, 0)
-            )
-            return GeneratedSqlPlan(
+                role_hashes=role_hashes,
+            ))
+        if selected_tables:
+            plans.append(self.sql_generator.generate_object_creates(
+                object_diffs=selected_tables,
                 target_type=target_type,
-                statements=schema_plan.statements + col_plan.statements,
-                warnings=schema_plan.warnings + col_plan.warnings,
-                risk_level=combined_risk,
-                auto_syncable_count=len(schema_plan.statements) + len(col_plan.statements),
+                existing_schema_owner_fixes=owner_fix_schemas,
+                role_hashes=role_hashes,
+            ))
+        if rebuild_views:
+            plans.append(self.sql_generator.generate_view_rebuilds(
+                views=rebuild_views,
+                target_type=target_type,
+            ))
+        if column_items:
+            plans.append(self.sql_generator.generate_missing_columns(
+                items=column_items,
+                target_type=target_type,
+            ))
+
+        if not plans:
+            return GeneratedSqlPlan(
+                target_type=target_type, statements=[],
+                auto_syncable_count=0,
                 manual_required_count=manual_count,
                 hint_only_count=hint_count,
             )
 
-        return self.sql_generator.generate_missing_columns(
-            items=column_items,
+        all_stmts: list[str] = []
+        all_warnings: list[str] = []
+        for p in plans:
+            all_stmts.extend(p.statements)
+            all_warnings.extend(p.warnings)
+        combined_risk = max(
+            (p.risk_level for p in plans),
+            key=lambda r: risk_levels.get(r, 0),
+        )
+        return GeneratedSqlPlan(
             target_type=target_type,
-            manual_count=manual_count,
-            hint_count=hint_count,
+            statements=all_stmts,
+            warnings=all_warnings,
+            risk_level=combined_risk,
+            auto_syncable_count=len(all_stmts),
+            manual_required_count=manual_count,
+            hint_only_count=hint_count,
         )
 
     def _open_sql_preview(self) -> None:
@@ -737,7 +799,7 @@ class MainWindow(QMainWindow):
 
         plan = self.generate_sql_plan_for_selected()
         if not plan.statements:
-            QMessageBox.information(self, "SQL 预览", "没有可同步的项目")
+            QMessageBox.information(self, "SQL 预览", self._no_syncable_message())
             return
 
         dialog = SqlPreviewDialog(
@@ -811,6 +873,7 @@ class MainWindow(QMainWindow):
                 f"同步完成: 成功 {result.success_count}, 失败 {result.failure_count}", 5000
             )
             ExecutionResultDialog(result, parent=self).exec()
+            self._refresh_target_after_sync_and_recompare()
 
         def _on_error(msg: str) -> None:
             self._worker_done(worker)
@@ -897,7 +960,7 @@ class MainWindow(QMainWindow):
             return
         plan = self.generate_sql_plan_for_selected()
         if not plan.statements:
-            QMessageBox.information(self, "Dry Run", "没有可同步的项目")
+            QMessageBox.information(self, "Dry Run", self._no_syncable_message())
             return
         from db_schema_sync_client.paths import development_data_dir
 
@@ -917,9 +980,196 @@ class MainWindow(QMainWindow):
             return
         plan = self.generate_sql_plan_for_selected()
         if not plan.statements:
-            QMessageBox.information(self, "执行同步", "没有可同步的项目")
+            QMessageBox.information(self, "执行同步", self._no_syncable_message())
             return
         self._execute_sync(plan)
+
+    def _no_syncable_message(self) -> str:
+        if self.current_diff is None:
+            return "没有可同步的项目"
+
+        auto_count = sum(
+            1 for d in self.current_diff.column_diffs if d.category == DiffCategory.AUTO_SYNCABLE
+        )
+        view_rebuild_count = sum(
+            1 for d in self.current_diff.column_diffs if d.category == DiffCategory.VIEW_REBUILD_SYNCABLE
+        )
+        schema_sync_count = sum(
+            1 for d in self.current_diff.object_diffs if d.category == DiffCategory.SCHEMA_SYNCABLE
+        )
+        table_sync_count = sum(
+            1 for d in self.current_diff.object_diffs if d.category == DiffCategory.TABLE_SYNCABLE
+        )
+        manual_count = (
+            sum(1 for d in self.current_diff.column_diffs if d.category == DiffCategory.MANUAL_REQUIRED)
+            + sum(1 for d in self.current_diff.object_diffs if d.category == DiffCategory.MANUAL_REQUIRED)
+        )
+        hint_count = (
+            sum(1 for d in self.current_diff.column_diffs if d.category == DiffCategory.ONLY_HINT)
+            + sum(1 for d in self.current_diff.object_diffs if d.category == DiffCategory.ONLY_HINT)
+        )
+
+        if auto_count + schema_sync_count + table_sync_count + view_rebuild_count > 0:
+            return (
+                "当前有可同步项，但可能未勾选。\n"
+                f"可自动同步字段: {auto_count}，可同步Schema: {schema_sync_count}，"
+                f"可同步对象: {table_sync_count}，可重建视图: {view_rebuild_count}。"
+            )
+        return (
+            "当前差异均为仅提示或需人工处理，暂无可自动生成 SQL 的项目。\n"
+            f"需人工处理: {manual_count}，仅提示: {hint_count}。"
+        )
+
+    # ------------------------------------------------------------------
+    # Source / target tree helpers
+    # ------------------------------------------------------------------
+
+    _CHECKABLE = Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled
+
+    def _populate_source_tree(self, snapshot: SchemaSnapshot) -> None:
+        """Populate source tree with checkable database/schema/object nodes."""
+        from db_schema_sync_client.domain.models import ObjectType
+
+        self._source_tree.blockSignals(True)
+        self._source_tree.clear()
+
+        db_item = QTreeWidgetItem([snapshot.database_name, "数据库"])
+        db_item.setFlags(db_item.flags() | self._CHECKABLE)
+        db_item.setCheckState(0, Qt.CheckState.Checked)
+        self._source_tree.addTopLevelItem(db_item)
+
+        schemas: dict[str, list] = defaultdict(list)
+        for table in snapshot.tables:
+            schemas[table.schema].append(table)
+
+        for schema_name in sorted(schemas):
+            schema_item = QTreeWidgetItem([schema_name, "Schema"])
+            schema_item.setFlags(schema_item.flags() | self._CHECKABLE)
+            schema_item.setCheckState(0, Qt.CheckState.Checked)
+            db_item.addChild(schema_item)
+            for table in sorted(schemas[schema_name], key=lambda t: t.name):
+                obj_type = "Table" if table.object_type == ObjectType.TABLE else "View"
+                table_item = QTreeWidgetItem([table.name, obj_type])
+                table_item.setFlags(table_item.flags() | self._CHECKABLE)
+                table_item.setCheckState(0, Qt.CheckState.Checked)
+                schema_item.addChild(table_item)
+
+        db_item.setExpanded(True)
+        self._source_tree.blockSignals(False)
+
+    # 目标端树节点 flags：可见复选框但不可操作（置灰）
+    _TGT_FLAGS = Qt.ItemFlag.ItemIsUserCheckable
+
+    def _populate_target_tree(self, snapshot: SchemaSnapshot, checked_schemas: set | None = None) -> None:
+        """Populate target tree with grayed-out checkboxes mirroring source structure.
+
+        checked_schemas: set of schema names that should appear checked.
+                         Pass None to check all. Pass empty set to uncheck all.
+        """
+        from db_schema_sync_client.domain.models import ObjectType
+
+        self._target_tree.clear()
+
+        db_checked = (
+            Qt.CheckState.Checked
+            if (checked_schemas is None or len(checked_schemas) > 0)
+            else Qt.CheckState.Unchecked
+        )
+        db_item = QTreeWidgetItem([snapshot.database_name, "数据库"])
+        db_item.setFlags(self._TGT_FLAGS)
+        db_item.setCheckState(0, db_checked)
+        self._target_tree.addTopLevelItem(db_item)
+
+        schemas: dict[str, list] = defaultdict(list)
+        for table in snapshot.tables:
+            schemas[table.schema].append(table)
+
+        for schema_name in sorted(schemas):
+            is_checked = checked_schemas is None or schema_name in checked_schemas
+            state = Qt.CheckState.Checked if is_checked else Qt.CheckState.Unchecked
+            schema_item = QTreeWidgetItem([schema_name, "Schema"])
+            schema_item.setFlags(self._TGT_FLAGS)
+            schema_item.setCheckState(0, state)
+            db_item.addChild(schema_item)
+            for table in sorted(schemas[schema_name], key=lambda t: t.name):
+                obj_type = "Table" if table.object_type == ObjectType.TABLE else "View"
+                table_item = QTreeWidgetItem([table.name, obj_type])
+                table_item.setFlags(self._TGT_FLAGS)
+                table_item.setCheckState(0, state)
+                schema_item.addChild(table_item)
+
+        db_item.setExpanded(True)
+
+    def _get_source_selected_schemas(self) -> set[str]:
+        """Return schema names that are at least partially checked in the source tree."""
+        result = set()
+        root = self._source_tree.invisibleRootItem()
+        for i in range(root.childCount()):          # database level
+            db_node = root.child(i)
+            for j in range(db_node.childCount()):   # schema level
+                schema_node = db_node.child(j)
+                if schema_node.checkState(0) != Qt.CheckState.Unchecked:
+                    result.add(schema_node.text(0))
+        return result
+
+    def _on_src_tree_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
+        """Cascade check state to children when a node is toggled."""
+        if column != 0:
+            return
+        self._source_tree.blockSignals(True)
+        self._cascade_check_state(item, item.checkState(0))
+        self._source_tree.blockSignals(False)
+        self._sync_target_tree_to_selection()
+
+    def _cascade_check_state(self, item: QTreeWidgetItem, state: Qt.CheckState) -> None:
+        for i in range(item.childCount()):
+            child = item.child(i)
+            if child.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                child.setCheckState(0, state)
+                self._cascade_check_state(child, state)
+
+    def _source_select_all(self) -> None:
+        """Check all items in the source tree."""
+        root = self._source_tree.invisibleRootItem()
+        self._source_tree.blockSignals(True)
+        for i in range(root.childCount()):
+            db_node = root.child(i)
+            if db_node.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                db_node.setCheckState(0, Qt.CheckState.Checked)
+            self._cascade_check_state(db_node, Qt.CheckState.Checked)
+        self._source_tree.blockSignals(False)
+        self._sync_target_tree_to_selection()
+
+    def _source_deselect_all(self) -> None:
+        """Uncheck all items in the source tree."""
+        root = self._source_tree.invisibleRootItem()
+        self._source_tree.blockSignals(True)
+        for i in range(root.childCount()):
+            db_node = root.child(i)
+            if db_node.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                db_node.setCheckState(0, Qt.CheckState.Unchecked)
+            self._cascade_check_state(db_node, Qt.CheckState.Unchecked)
+        self._source_tree.blockSignals(False)
+        self._sync_target_tree_to_selection()
+
+    def _sync_target_tree_to_selection(self) -> None:
+        """Mirror source check states to target tree (same list, same check states)."""
+        if self._target_snapshot is None:
+            return
+        sel = self._get_source_selected_schemas()
+        self._populate_target_tree(self._target_snapshot, checked_schemas=sel)
+
+    def _refresh_source(self) -> None:
+        """Force-reload source metadata."""
+        self._source_snapshot = None
+        self._source_tree.clear()
+        self._load_source_metadata()
+
+    def _refresh_target(self) -> None:
+        """Force-reload target metadata."""
+        self._target_snapshot = None
+        self._target_tree.clear()
+        self._load_target_metadata()
 
     @staticmethod
     def _profiles_are_same_instance(a: ConnectionProfile, b: ConnectionProfile) -> bool:

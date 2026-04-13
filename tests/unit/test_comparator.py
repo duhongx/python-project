@@ -120,7 +120,7 @@ def test_compare_missing_schema_is_hint_only():
     assert diff.object_diffs[0].reason == "missing_schema"
 
 
-def test_compare_missing_table_is_hint_only():
+def test_compare_missing_table_is_table_syncable():
     source = SchemaSnapshot(
         database_name="source",
         tables=(
@@ -148,7 +148,7 @@ def test_compare_missing_table_is_hint_only():
 
     assert diff.object_diffs[0].object_name == "users"
     assert diff.object_diffs[0].status == DiffStatus.ONLY_SOURCE
-    assert diff.object_diffs[0].category == DiffCategory.ONLY_HINT
+    assert diff.object_diffs[0].category == DiffCategory.TABLE_SYNCABLE
     assert diff.object_diffs[0].reason == "missing_table"
 
 
@@ -295,3 +295,49 @@ def test_compare_type_nullability_and_default_mismatches_require_manual_work():
         DiffStatus.DEFAULT_MISMATCH,
     }
     assert categories == {DiffCategory.MANUAL_REQUIRED}
+
+
+def test_view_missing_target_column_is_hint_and_marked_as_view():
+    source = SchemaSnapshot(
+        database_name="source",
+        tables=(
+            TableDefinition(
+                schema="df_demo",
+                name="v_orders",
+                object_type=ObjectType.VIEW,
+                columns=(
+                    ColumnDefinition(
+                        name="order_no",
+                        ordinal_position=1,
+                        data_type="character varying",
+                        character_maximum_length=32,
+                        numeric_precision=None,
+                        numeric_scale=None,
+                        is_nullable=True,
+                        column_default=None,
+                        is_sequence_related=False,
+                    ),
+                ),
+            ),
+        ),
+    )
+    target = SchemaSnapshot(
+        database_name="target",
+        tables=(
+            TableDefinition(
+                schema="df_demo",
+                name="v_orders",
+                object_type=ObjectType.VIEW,
+                columns=(),
+            ),
+        ),
+    )
+
+    diff = SchemaComparator().compare(source, target)
+
+    assert len(diff.column_diffs) == 1
+    cd = diff.column_diffs[0]
+    assert cd.status == DiffStatus.ONLY_SOURCE
+    assert cd.reason == "missing_target_column"
+    assert cd.category == DiffCategory.VIEW_REBUILD_SYNCABLE
+    assert cd.object_type == ObjectType.VIEW

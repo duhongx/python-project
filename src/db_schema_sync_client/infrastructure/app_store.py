@@ -50,6 +50,7 @@ class AppStore:
                     credential_key TEXT NOT NULL,
                     schema_prefix TEXT NOT NULL,
                     owner_prefix TEXT NOT NULL,
+                    schema_names_filter TEXT NOT NULL DEFAULT '',
                     is_default INTEGER NOT NULL DEFAULT 0,
                     last_test_status TEXT,
                     last_test_message TEXT,
@@ -132,10 +133,11 @@ class AppStore:
                         credential_key,
                         schema_prefix,
                         owner_prefix,
+                        schema_names_filter,
                         is_default,
                         last_test_status,
                         last_test_message
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         profile.name,
@@ -148,6 +150,7 @@ class AppStore:
                         credential_key,
                         profile.schema_prefix,
                         profile.owner_prefix,
+                        profile.schema_names_filter,
                         int(profile.is_default),
                         profile.last_test_status,
                         profile.last_test_message,
@@ -168,6 +171,7 @@ class AppStore:
                         credential_key = ?,
                         schema_prefix = ?,
                         owner_prefix = ?,
+                        schema_names_filter = ?,
                         is_default = ?,
                         last_test_status = ?,
                         last_test_message = ?,
@@ -185,6 +189,7 @@ class AppStore:
                         credential_key,
                         profile.schema_prefix,
                         profile.owner_prefix,
+                        profile.schema_names_filter,
                         int(profile.is_default),
                         profile.last_test_status,
                         profile.last_test_message,
@@ -413,6 +418,10 @@ class AppStore:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(compare_tasks)").fetchall()}
         if "result_json" not in cols:
             conn.execute("ALTER TABLE compare_tasks ADD COLUMN result_json TEXT")
+        # connection_profiles.schema_names_filter
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(connection_profiles)").fetchall()}
+        if "schema_names_filter" not in cols:
+            conn.execute("ALTER TABLE connection_profiles ADD COLUMN schema_names_filter TEXT NOT NULL DEFAULT ''")
 
     def _seed_default_admin(self, conn: sqlite3.Connection) -> None:
         row = conn.execute(
@@ -461,6 +470,7 @@ class AppStore:
             credential_key=row["credential_key"],
             schema_prefix=row["schema_prefix"],
             owner_prefix=row["owner_prefix"],
+            schema_names_filter=row["schema_names_filter"] or "",
             is_default=bool(row["is_default"]),
             last_test_status=row["last_test_status"],
             last_test_message=row["last_test_message"],

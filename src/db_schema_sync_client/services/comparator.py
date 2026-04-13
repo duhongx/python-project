@@ -60,10 +60,10 @@ class SchemaComparator:
             category = DiffCategory.SCHEMA_SYNCABLE
         elif source_object.object_type == ObjectType.TABLE:
             reason = "missing_table"
-            category = DiffCategory.ONLY_HINT
+            category = DiffCategory.TABLE_SYNCABLE
         else:
             reason = "missing_view"
-            category = DiffCategory.ONLY_HINT
+            category = DiffCategory.TABLE_SYNCABLE
 
         return ObjectDiff(
             schema=source_object.schema,
@@ -96,6 +96,7 @@ class SchemaComparator:
                         category=self._missing_target_column_category(source_object, source_column),
                         source_column=source_column,
                         target_column=None,
+                        object_type=source_object.object_type,
                         reason="missing_target_column",
                     )
                 )
@@ -144,6 +145,7 @@ class SchemaComparator:
                     category=DiffCategory.ONLY_HINT,
                     source_column=None,
                     target_column=target_column,
+                    object_type=target_object.object_type,
                     reason="extra_target_column",
                 )
             )
@@ -166,6 +168,7 @@ class SchemaComparator:
             category=DiffCategory.MANUAL_REQUIRED,
             source_column=source_column,
             target_column=target_column,
+            object_type=source_object.object_type,
             reason=status.value,
         )
 
@@ -174,6 +177,8 @@ class SchemaComparator:
         source_object: TableDefinition,
         source_column: ColumnDefinition,
     ) -> DiffCategory:
+        if source_object.object_type == ObjectType.VIEW:
+            return DiffCategory.VIEW_REBUILD_SYNCABLE
         if source_object.object_type != ObjectType.TABLE:
             return DiffCategory.ONLY_HINT
         if source_column.is_sequence_related:

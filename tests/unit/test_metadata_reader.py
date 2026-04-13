@@ -7,6 +7,7 @@ def test_parse_table_row_maps_base_table():
         "table_schema": "df_demo",
         "table_name": "users",
         "table_type": "BASE TABLE",
+        "table_comment": "用户表",
     }
 
     parsed = parse_table_row(row)
@@ -14,6 +15,7 @@ def test_parse_table_row_maps_base_table():
     assert parsed.schema == "df_demo"
     assert parsed.name == "users"
     assert parsed.object_type == ObjectType.TABLE
+    assert parsed.comment == "用户表"
 
 
 def test_parse_table_row_maps_view():
@@ -21,11 +23,13 @@ def test_parse_table_row_maps_view():
         "table_schema": "df_demo",
         "table_name": "v_users",
         "table_type": "VIEW",
+        "table_comment": "视图说明",
     }
 
     parsed = parse_table_row(row)
 
     assert parsed.object_type == ObjectType.VIEW
+    assert parsed.comment == "视图说明"
 
 
 def test_parse_column_row_preserves_numeric_precision_scale_and_default():
@@ -38,6 +42,7 @@ def test_parse_column_row_preserves_numeric_precision_scale_and_default():
         "numeric_scale": 2,
         "is_nullable": "NO",
         "column_default": "0",
+        "column_comment": "金额",
     }
 
     parsed = parse_column_row(row)
@@ -46,6 +51,7 @@ def test_parse_column_row_preserves_numeric_precision_scale_and_default():
     assert parsed.numeric_scale == 2
     assert parsed.column_default == "0"
     assert parsed.is_nullable is False
+    assert parsed.comment == "金额"
 
 
 def test_parse_column_row_marks_sequence_defaults():
