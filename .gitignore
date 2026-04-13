@@ -19,3 +19,8 @@ reports/
 .idea/
 .vscode/
 *.swp
+
+# runtime data
+data/app.db
+data/reports/
+reports/
