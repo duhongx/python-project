@@ -22,6 +22,13 @@ class ConnectionRole(str, Enum):
     TARGET = "target"
 
 
+class ClusterEnvironment(str, Enum):
+    PROD = "PROD"
+    UAT = "UAT"
+    TEST = "TEST"
+    DEV = "DEV"
+
+
 @dataclass(frozen=True)
 class PrimaryKeyDefinition:
     name: str
@@ -105,3 +112,21 @@ class SchemaSnapshot:
     @property
     def qualified_objects(self) -> Dict[str, TableDefinition]:
         return {table.qualified_name: table for table in self.tables}
+
+
+@dataclass(frozen=True)
+class ClusterProfile:
+    name: str
+    environment: ClusterEnvironment
+    patroni_endpoints: Tuple[str, ...] = field(default_factory=tuple)
+    pg_host: str = ""
+    pg_port: int = 5432
+    pg_database: str = "postgres"
+    pg_username: str = ""
+    etcd_endpoints: Tuple[str, ...] = field(default_factory=tuple)
+    description: str = ""
+    id: Optional[int] = None
+    credential_key: Optional[str] = None
+    is_enabled: bool = True
+    last_health_status: Optional[str] = None
+    last_health_message: Optional[str] = None

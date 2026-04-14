@@ -10,12 +10,20 @@ if importlib.util.find_spec("PyQt6") is None:
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication, QDialog
+from PyQt6.QtWidgets import QApplication, QDialog, QPushButton
 
 from db_schema_sync_client.domain.diff import ColumnDiff, DiffCategory, DiffStatus, SchemaDiff
-from db_schema_sync_client.domain.models import ColumnDefinition, ConnectionProfile, ConnectionRole, DatabaseType
+from db_schema_sync_client.domain.models import (
+    ClusterEnvironment,
+    ClusterProfile,
+    ColumnDefinition,
+    ConnectionProfile,
+    ConnectionRole,
+    DatabaseType,
+)
 from db_schema_sync_client.services.report_service import ReportService
 from db_schema_sync_client.services.sql_generator import GeneratedSqlPlan
+from db_schema_sync_client.ui.cluster_list_page import ClusterListPage
 from db_schema_sync_client.ui.config_dialog import ConnectionConfigDialog, validate_profile_inputs
 from db_schema_sync_client.ui.login_dialog import LoginDialog
 from db_schema_sync_client.ui.main_window import MainWindow
@@ -36,6 +44,45 @@ class FakeStore:
     def verify_user(self, username, password):
         self.verified.append((username, password))
         return username == "admin" and password == "cloudhis@2123"
+
+
+class FakeClusterStore:
+    def list_cluster_profiles(self, environment=None, keyword=None, enabled_only=False):
+        clusters = [
+            ClusterProfile(
+                id=1,
+                name="HIS-PROD",
+                environment=ClusterEnvironment.PROD,
+                patroni_endpoints=("http://patroni-prod:8008",),
+                pg_host="10.0.0.10",
+                pg_port=5432,
+                pg_database="postgres",
+                pg_username="postgres",
+                etcd_endpoints=("http://etcd-prod:2379",),
+                is_enabled=True,
+                last_health_status="healthy",
+            ),
+            ClusterProfile(
+                id=2,
+                name="HIS-UAT",
+                environment=ClusterEnvironment.UAT,
+                patroni_endpoints=("http://patroni-uat:8008",),
+                pg_host="10.0.0.20",
+                pg_port=5432,
+                pg_database="postgres",
+                pg_username="postgres",
+                etcd_endpoints=("http://etcd-uat:2379",),
+                is_enabled=False,
+                last_health_status="warning",
+            ),
+        ]
+        if environment is not None:
+            clusters = [cluster for cluster in clusters if cluster.environment == environment]
+        if enabled_only:
+            clusters = [cluster for cluster in clusters if cluster.is_enabled]
+        if keyword:
+            clusters = [cluster for cluster in clusters if keyword.lower() in cluster.name.lower()]
+        return clusters
 
 
 class UiTests(unittest.TestCase):
@@ -169,6 +216,30 @@ class UiTests(unittest.TestCase):
             plan.statements,
             ['ALTER TABLE "df_demo"."users" ADD COLUMN "display_name" character varying(100);'],
         )
+
+    def test_main_window_builds_navigation_shell_with_structure_sync_default(self):
+        window = MainWindow(app_store=None)
+
+        self.assertTrue(hasattr(window, "navigation_list"))
+        self.assertTrue(hasattr(window, "page_stack"))
+        self.assertTrue(hasattr(window, "structure_sync_page"))
+        self.assertEqual(window.navigation_list.count(), 4)
+        self.assertIs(window.page_stack.currentWidget(), window.structure_sync_page)
+
+    def test_main_window_keeps_config_and_history_entry_points(self):
+        window = MainWindow(app_store=None)
+        button_texts = {button.text() for button in window.findChildren(QPushButton)}
+
+        self.assertIn("连接配置", button_texts)
+        self.assertIn("历史记录", button_texts)
+
+    def test_cluster_list_page_loads_rows_from_store(self):
+        page = ClusterListPage(FakeClusterStore())
+
+        page.refresh()
+
+        self.assertEqual(page.cluster_table.rowCount(), 2)
+        self.assertEqual(page.cluster_table.item(0, 1).text(), "HIS-PROD")
 
     def test_sql_preview_dialog_dry_run_saves_report_without_execution(self):
         target = ConnectionProfile(
