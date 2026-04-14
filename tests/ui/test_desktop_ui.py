@@ -24,6 +24,7 @@ from db_schema_sync_client.domain.models import (
 from db_schema_sync_client.services.report_service import ReportService
 from db_schema_sync_client.services.sql_generator import GeneratedSqlPlan
 from db_schema_sync_client.ui.cluster_list_page import ClusterListPage
+from db_schema_sync_client.ui.cluster_overview_page import ClusterOverviewPage
 from db_schema_sync_client.ui.config_dialog import ConnectionConfigDialog, validate_profile_inputs
 from db_schema_sync_client.ui.login_dialog import LoginDialog
 from db_schema_sync_client.ui.main_window import MainWindow
@@ -47,6 +48,11 @@ class FakeStore:
 
 
 class FakeClusterStore:
+    def __init__(self):
+        self.audit_records = [
+            {"created_at": "2026-04-14 10:03", "operator": "admin", "action": "reload", "status": "success", "detail": "pg02"}
+        ]
+
     def list_cluster_profiles(self, environment=None, keyword=None, enabled_only=False):
         clusters = [
             ClusterProfile(
@@ -83,6 +89,39 @@ class FakeClusterStore:
         if keyword:
             clusters = [cluster for cluster in clusters if keyword.lower() in cluster.name.lower()]
         return clusters
+
+    def get_cluster_profile(self, cluster_id):
+        for cluster in self.list_cluster_profiles():
+            if cluster.id == cluster_id:
+                return cluster
+        return None
+
+    def list_cluster_audit_logs(self, cluster_id=None, limit=20):
+        return self.audit_records[:limit]
+
+
+class FakeClusterService:
+    def load_overview(self, cluster, app_store):
+        from db_schema_sync_client.services.cluster_service import ClusterNodeStatus, ClusterOverview
+
+        return ClusterOverview(
+            cluster_name=cluster.name,
+            status="healthy",
+            primary_node="pg01",
+            replica_count=2,
+            patroni_healthy_count=3,
+            patroni_total_count=3,
+            etcd_healthy_count=3,
+            etcd_total_count=3,
+            total_connections=120,
+            active_connections=18,
+            topology_lines=("pg01 (Primary)  --->  pg02 (Replica)", "pg01 (Primary)  --->  pg03 (Replica)"),
+            nodes=(
+                ClusterNodeStatus("pg01", "Primary", "正常", "12", "-", False, "10:21:03"),
+                ClusterNodeStatus("pg02", "Replica", "正常", "12", "0 MB", False, "10:21:01"),
+            ),
+            recent_operations=tuple(app_store.list_cluster_audit_logs(cluster.id)),
+        )
 
 
 class UiTests(unittest.TestCase):
@@ -240,6 +279,27 @@ class UiTests(unittest.TestCase):
 
         self.assertEqual(page.cluster_table.rowCount(), 2)
         self.assertEqual(page.cluster_table.item(0, 1).text(), "HIS-PROD")
+
+    def test_cluster_list_page_calls_detail_callback_for_selected_cluster(self):
+        seen = []
+        page = ClusterListPage(FakeClusterStore(), open_cluster_callback=seen.append)
+
+        page.refresh()
+        page.cluster_table.selectRow(0)
+        page._open_selected_cluster()
+
+        self.assertEqual(seen, [1])
+
+    def test_cluster_overview_page_renders_summary_from_service(self):
+        store = FakeClusterStore()
+        cluster = store.get_cluster_profile(1)
+        page = ClusterOverviewPage(store, FakeClusterService(), cluster)
+
+        page.refresh()
+
+        self.assertIn("Primary: pg01", page.summary_label.text())
+        self.assertEqual(page.node_table.rowCount(), 2)
+        self.assertEqual(page.audit_table.rowCount(), 1)
 
     def test_sql_preview_dialog_dry_run_saves_report_without_execution(self):
         target = ConnectionProfile(

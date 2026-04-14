@@ -21,7 +21,10 @@ from PyQt6.QtWidgets import (
 from db_schema_sync_client.domain.diff import SchemaDiff
 from db_schema_sync_client.domain.models import ConnectionProfile
 from db_schema_sync_client.infrastructure.app_store import AppStore
+from db_schema_sync_client.services.cluster_service import ClusterService
 from db_schema_sync_client.services.sql_generator import GeneratedSqlPlan
+from db_schema_sync_client.ui.cluster_list_page import ClusterListPage
+from db_schema_sync_client.ui.cluster_overview_page import ClusterOverviewPage
 from db_schema_sync_client.ui.structure_sync_page import StructureSyncPage
 
 
@@ -142,7 +145,18 @@ class MainWindow(QMainWindow):
 
     def _register_pages(self) -> None:
         self.structure_sync_page = StructureSyncPage(self.app_store, parent=self)
-        self.cluster_page = _PlaceholderPage("集群管理页面开发中", parent=self)
+        self.cluster_service = ClusterService()
+        self.cluster_page = ClusterListPage(
+            self.app_store,
+            parent=self,
+            open_cluster_callback=self._open_cluster_overview,
+        )
+        self.cluster_overview_page = ClusterOverviewPage(
+            self.app_store,
+            self.cluster_service,
+            parent=self,
+        )
+        self.cluster_overview_page.on_back = self._return_to_cluster_list
         self.history_page = _PlaceholderPage("历史与审计页面开发中", parent=self)
         self.settings_page = _PlaceholderPage("系统设置页面开发中", parent=self)
 
@@ -156,6 +170,7 @@ class MainWindow(QMainWindow):
         for label, _, page in self._pages:
             self.navigation_list.addItem(QListWidgetItem(label))
             self.page_stack.addWidget(page)
+        self.page_stack.addWidget(self.cluster_overview_page)
 
     def _switch_page(self, index: int) -> None:
         if index < 0 or index >= len(self._pages):
@@ -186,6 +201,24 @@ class MainWindow(QMainWindow):
 
     def _run_comparison(self) -> None:
         self.structure_sync_page._run_comparison()
+
+    def _open_cluster_overview(self, cluster_id: int) -> None:
+        if self.app_store is None:
+            return
+        cluster = self.app_store.get_cluster_profile(cluster_id)
+        if cluster is None:
+            return
+        self.cluster_overview_page.set_cluster(cluster)
+        self.page_stack.setCurrentWidget(self.cluster_overview_page)
+        self.page_title_label.setText("集群总览")
+        self.breadcrumb_label.setText(f"集群管理 / 集群总览 / {cluster.name}")
+        self.navigation_list.setCurrentRow(1)
+
+    def _return_to_cluster_list(self) -> None:
+        self.navigation_list.setCurrentRow(1)
+        self.page_stack.setCurrentWidget(self.cluster_page)
+        self.page_title_label.setText("集群管理")
+        self.breadcrumb_label.setText("集群管理 / 集群列表")
 
     @property
     def comparison_panel(self):

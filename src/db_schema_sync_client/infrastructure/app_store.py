@@ -7,7 +7,13 @@ import uuid
 from pathlib import Path
 from typing import Iterable, Optional
 
-from db_schema_sync_client.domain.models import ConnectionProfile, ConnectionRole, DatabaseType
+from db_schema_sync_client.domain.models import (
+    ClusterEnvironment,
+    ClusterProfile,
+    ConnectionProfile,
+    ConnectionRole,
+    DatabaseType,
+)
 
 from .credentials import CredentialStore, KeyringCredentialStore, hash_password, verify_password
 
@@ -91,6 +97,35 @@ class AppStore:
                     statement_text TEXT NOT NULL,
                     status TEXT NOT NULL,
                     error_message TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS cluster_profiles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    environment TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    patroni_endpoints_text TEXT NOT NULL,
+                    pg_host TEXT NOT NULL,
+                    pg_port INTEGER NOT NULL,
+                    pg_database TEXT NOT NULL,
+                    pg_username TEXT NOT NULL,
+                    pg_credential_key TEXT NOT NULL,
+                    etcd_endpoints_text TEXT NOT NULL,
+                    is_enabled INTEGER NOT NULL DEFAULT 1,
+                    last_health_status TEXT,
+                    last_health_message TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS cluster_audit_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cluster_id INTEGER,
+                    operator TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    detail TEXT,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
                 """
@@ -283,6 +318,174 @@ class AppStore:
             )
         self.credential_store.delete(row["credential_key"])
 
+    def save_cluster_profile(self, profile: ClusterProfile, password: str) -> ClusterProfile:
+        self._validate_cluster_profile(profile)
+
+        credential_key = profile.credential_key or self._build_cluster_credential_key(profile)
+        self.credential_store.set(credential_key, password)
+
+        with self._connect() as conn:
+            if profile.id is None:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO cluster_profiles (
+                        name,
+                        environment,
+                        description,
+                        patroni_endpoints_text,
+                        pg_host,
+                        pg_port,
+                        pg_database,
+                        pg_username,
+                        pg_credential_key,
+                        etcd_endpoints_text,
+                        is_enabled,
+                        last_health_status,
+                        last_health_message
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        profile.name,
+                        profile.environment.value,
+                        profile.description,
+                        ",".join(profile.patroni_endpoints),
+                        profile.pg_host,
+                        profile.pg_port,
+                        profile.pg_database,
+                        profile.pg_username,
+                        credential_key,
+                        ",".join(profile.etcd_endpoints),
+                        int(profile.is_enabled),
+                        profile.last_health_status,
+                        profile.last_health_message,
+                    ),
+                )
+                profile_id = cursor.lastrowid
+            else:
+                conn.execute(
+                    """
+                    UPDATE cluster_profiles
+                    SET name = ?,
+                        environment = ?,
+                        description = ?,
+                        patroni_endpoints_text = ?,
+                        pg_host = ?,
+                        pg_port = ?,
+                        pg_database = ?,
+                        pg_username = ?,
+                        pg_credential_key = ?,
+                        etcd_endpoints_text = ?,
+                        is_enabled = ?,
+                        last_health_status = ?,
+                        last_health_message = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (
+                        profile.name,
+                        profile.environment.value,
+                        profile.description,
+                        ",".join(profile.patroni_endpoints),
+                        profile.pg_host,
+                        profile.pg_port,
+                        profile.pg_database,
+                        profile.pg_username,
+                        credential_key,
+                        ",".join(profile.etcd_endpoints),
+                        int(profile.is_enabled),
+                        profile.last_health_status,
+                        profile.last_health_message,
+                        profile.id,
+                    ),
+                )
+                profile_id = profile.id
+
+            row = conn.execute(
+                "SELECT * FROM cluster_profiles WHERE id = ?",
+                (profile_id,),
+            ).fetchone()
+
+        return self._row_to_cluster_profile(row)
+
+    def list_cluster_profiles(
+        self,
+        environment: Optional[ClusterEnvironment] = None,
+        keyword: Optional[str] = None,
+        enabled_only: bool = False,
+    ) -> list[ClusterProfile]:
+        query = "SELECT * FROM cluster_profiles WHERE 1=1"
+        params: list[object] = []
+        if environment is not None:
+            query += " AND environment = ?"
+            params.append(environment.value)
+        if keyword:
+            query += " AND name LIKE ?"
+            params.append(f"%{keyword}%")
+        if enabled_only:
+            query += " AND is_enabled = 1"
+        query += " ORDER BY id"
+
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+
+        return [self._row_to_cluster_profile(row) for row in rows]
+
+    def get_cluster_profile(self, cluster_id: int) -> Optional[ClusterProfile]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM cluster_profiles WHERE id = ?",
+                (cluster_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_cluster_profile(row)
+
+    def delete_cluster_profile(self, cluster_id: int) -> None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT pg_credential_key FROM cluster_profiles WHERE id = ?",
+                (cluster_id,),
+            ).fetchone()
+            if row is None:
+                return
+            conn.execute("DELETE FROM cluster_profiles WHERE id = ?", (cluster_id,))
+        self.credential_store.delete(row["pg_credential_key"])
+
+    def add_cluster_audit_log(
+        self,
+        cluster_id: Optional[int],
+        operator: str,
+        action: str,
+        status: str,
+        detail: Optional[str] = None,
+    ) -> int:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO cluster_audit_logs (cluster_id, operator, action, status, detail)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (cluster_id, operator, action, status, detail),
+            )
+            return cursor.lastrowid
+
+    def list_cluster_audit_logs(
+        self,
+        cluster_id: Optional[int] = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        query = "SELECT * FROM cluster_audit_logs WHERE 1=1"
+        params: list[object] = []
+        if cluster_id is not None:
+            query += " AND cluster_id = ?"
+            params.append(cluster_id)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
     def create_sync_run(
         self,
         target_profile_id: Optional[int],
@@ -422,6 +625,41 @@ class AppStore:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(connection_profiles)").fetchall()}
         if "schema_names_filter" not in cols:
             conn.execute("ALTER TABLE connection_profiles ADD COLUMN schema_names_filter TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cluster_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                environment TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                patroni_endpoints_text TEXT NOT NULL,
+                pg_host TEXT NOT NULL,
+                pg_port INTEGER NOT NULL,
+                pg_database TEXT NOT NULL,
+                pg_username TEXT NOT NULL,
+                pg_credential_key TEXT NOT NULL,
+                etcd_endpoints_text TEXT NOT NULL,
+                is_enabled INTEGER NOT NULL DEFAULT 1,
+                last_health_status TEXT,
+                last_health_message TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cluster_audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cluster_id INTEGER,
+                operator TEXT NOT NULL,
+                action TEXT NOT NULL,
+                status TEXT NOT NULL,
+                detail TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
 
     def _seed_default_admin(self, conn: sqlite3.Connection) -> None:
         row = conn.execute(
@@ -449,6 +687,20 @@ class AppStore:
         if not 1 <= profile.port <= 65535:
             raise ValueError("Port must be between 1 and 65535")
 
+    def _validate_cluster_profile(self, profile: ClusterProfile) -> None:
+        if not profile.name.strip():
+            raise ValueError("Cluster name is required")
+        if not profile.patroni_endpoints:
+            raise ValueError("At least one Patroni endpoint is required")
+        if not profile.pg_host.strip():
+            raise ValueError("Cluster PG host is required")
+        if not profile.pg_username.strip():
+            raise ValueError("Cluster PG username is required")
+        if not profile.etcd_endpoints:
+            raise ValueError("At least one etcd endpoint is required")
+        if not 1 <= profile.pg_port <= 65535:
+            raise ValueError("Cluster PG port must be between 1 and 65535")
+
     def _build_credential_key(self, profile: ConnectionProfile) -> str:
         return (
             f"{profile.role.value}:"
@@ -456,6 +708,9 @@ class AppStore:
             f"{profile.name}:"
             f"{uuid.uuid4().hex}"
         )
+
+    def _build_cluster_credential_key(self, profile: ClusterProfile) -> str:
+        return f"cluster:{profile.name}:{uuid.uuid4().hex}"
 
     def _row_to_profile(self, row: sqlite3.Row) -> ConnectionProfile:
         return ConnectionProfile(
@@ -474,6 +729,32 @@ class AppStore:
             is_default=bool(row["is_default"]),
             last_test_status=row["last_test_status"],
             last_test_message=row["last_test_message"],
+        )
+
+    def _row_to_cluster_profile(self, row: sqlite3.Row) -> ClusterProfile:
+        return ClusterProfile(
+            id=row["id"],
+            name=row["name"],
+            environment=ClusterEnvironment(row["environment"]),
+            description=row["description"] or "",
+            patroni_endpoints=tuple(
+                part.strip()
+                for part in (row["patroni_endpoints_text"] or "").split(",")
+                if part.strip()
+            ),
+            pg_host=row["pg_host"],
+            pg_port=row["pg_port"],
+            pg_database=row["pg_database"],
+            pg_username=row["pg_username"],
+            credential_key=row["pg_credential_key"],
+            etcd_endpoints=tuple(
+                part.strip()
+                for part in (row["etcd_endpoints_text"] or "").split(",")
+                if part.strip()
+            ),
+            is_enabled=bool(row["is_enabled"]),
+            last_health_status=row["last_health_status"],
+            last_health_message=row["last_health_message"],
         )
 
     def _clear_default_for_role(self, conn: sqlite3.Connection, role: ConnectionRole) -> None:
