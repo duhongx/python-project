@@ -21,6 +21,9 @@ from PyQt6.QtWidgets import (
 from db_schema_sync_client.domain.diff import SchemaDiff
 from db_schema_sync_client.domain.models import ConnectionProfile
 from db_schema_sync_client.infrastructure.app_store import AppStore
+from db_schema_sync_client.k8s.infrastructure.k8s_store import K8sStore
+from db_schema_sync_client.k8s.infrastructure.kubeconfig_store import KubeconfigStore
+from db_schema_sync_client.k8s.ui.k8s_page import K8sPage
 from db_schema_sync_client.services.cluster_service import ClusterService
 from db_schema_sync_client.services.sql_generator import GeneratedSqlPlan
 from db_schema_sync_client.ui.cluster_list_page import ClusterListPage
@@ -45,9 +48,17 @@ class _PlaceholderPage(QWidget):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, app_store: Optional[AppStore] = None, parent=None) -> None:
+    def __init__(
+        self,
+        app_store: Optional[AppStore] = None,
+        k8s_store: Optional[K8sStore] = None,
+        kubeconfig_store: Optional[KubeconfigStore] = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.app_store = app_store
+        self.k8s_store = k8s_store
+        self.kubeconfig_store = kubeconfig_store
 
         self.setWindowTitle("数据库结构同步客户端")
         self.resize(1280, 820)
@@ -160,9 +171,17 @@ class MainWindow(QMainWindow):
         self.history_page = _PlaceholderPage("历史与审计页面开发中", parent=self)
         self.settings_page = _PlaceholderPage("系统设置页面开发中", parent=self)
 
+        if self.k8s_store is not None and self.kubeconfig_store is not None:
+            self.k8s_page: QWidget = K8sPage(
+                self.k8s_store, self.kubeconfig_store, parent=self
+            )
+        else:
+            self.k8s_page = _PlaceholderPage("K8s 部署管理（未初始化）", parent=self)
+
         self._pages = [
             ("结构同步", "结构同步 / 结构比对", self.structure_sync_page),
             ("集群管理", "集群管理 / 集群列表", self.cluster_page),
+            ("K8s 部署管理", "K8s 部署管理 / 备份与回滚", self.k8s_page),
             ("历史与审计", "历史与审计", self.history_page),
             ("系统设置", "系统设置", self.settings_page),
         ]

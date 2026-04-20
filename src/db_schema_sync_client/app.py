@@ -2,13 +2,15 @@
 
 import sys
 
-from db_schema_sync_client.paths import development_db_path
+from db_schema_sync_client.paths import development_db_path, development_kubeconfigs_dir
 
 
 def main() -> int:
     from PyQt6.QtWidgets import QApplication, QDialog
 
     from db_schema_sync_client.infrastructure.app_store import AppStore
+    from db_schema_sync_client.k8s.infrastructure.k8s_store import K8sStore
+    from db_schema_sync_client.k8s.infrastructure.kubeconfig_store import KubeconfigStore
     from db_schema_sync_client.ui.login_dialog import LoginDialog
     from db_schema_sync_client.ui.main_window import MainWindow
 
@@ -30,11 +32,16 @@ def main() -> int:
     app_store = AppStore(db_path, credential_store=credential_store)
     app_store.initialize()
 
+    k8s_store = K8sStore(db_path)
+    k8s_store.initialize()
+
+    kubeconfig_store = KubeconfigStore(development_kubeconfigs_dir())
+
     login = LoginDialog(app_store)
     if login.exec() != QDialog.DialogCode.Accepted:
         return 0
 
-    window = MainWindow(app_store)
+    window = MainWindow(app_store, k8s_store=k8s_store, kubeconfig_store=kubeconfig_store)
     window.show()
     return app.exec()
 

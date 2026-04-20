@@ -23,4 +23,5 @@ reports/
 # runtime data
 data/app.db
 data/reports/
+data/kubeconfigs/
 reports/

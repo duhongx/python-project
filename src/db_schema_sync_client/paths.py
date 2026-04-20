@@ -32,3 +32,13 @@ def application_data_dir(app_name: str = "db-schema-sync") -> Path:
 def packaged_db_path() -> Path:
     """Return the packaged-app SQLite path."""
     return application_data_dir() / "app.db"
+
+
+def development_kubeconfigs_dir() -> Path:
+    """Return the project-local kubeconfig storage directory for development runs."""
+    return development_data_dir() / "kubeconfigs"
+
+
+def kubeconfigs_dir() -> Path:
+    """Return the kubeconfig storage directory for the current runtime context."""
+    return application_data_dir() / "kubeconfigs"

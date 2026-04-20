@@ -86,6 +86,8 @@ class HistoryDialog(QDialog):
         self.sync_table.horizontalHeader().setStretchLastSection(True)
         self.sync_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.sync_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.sync_table.setAlternatingRowColors(True)
+        self.sync_table.verticalHeader().setVisible(False)
         sync_layout.addWidget(self.sync_table)
 
         sync_btn_row = QHBoxLayout()
@@ -135,6 +137,8 @@ class HistoryDialog(QDialog):
         self.compare_table.horizontalHeader().setStretchLastSection(True)
         self.compare_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.compare_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.compare_table.setAlternatingRowColors(True)
+        self.compare_table.verticalHeader().setVisible(False)
         compare_layout.addWidget(self.compare_table)
 
         cmp_btn_row = QHBoxLayout()

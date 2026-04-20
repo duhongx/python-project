@@ -77,6 +77,8 @@ class ClusterListPage(QWidget):
         self.cluster_table.horizontalHeader().setStretchLastSection(True)
         self.cluster_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.cluster_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.cluster_table.setAlternatingRowColors(True)
+        self.cluster_table.verticalHeader().setVisible(False)
         self.cluster_table.doubleClicked.connect(self._edit_selected_cluster)
         layout.addWidget(self.cluster_table)
 
